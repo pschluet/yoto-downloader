@@ -1,69 +1,351 @@
-import Image from "next/image";
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { formatBytes, formatDuration } from "@/lib/format";
+import type { JobSnapshot, JobTrack, ResolveResult, Track } from "@/types";
+
+type Stage = "input" | "resolved" | "job";
 
 export default function Home() {
+  const [url, setUrl] = useState("");
+  const [stage, setStage] = useState<Stage>("input");
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const [resolved, setResolved] = useState<ResolveResult | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [job, setJob] = useState<JobSnapshot | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const esRef = useRef<EventSource | null>(null);
+
+  const tracks: Track[] = useMemo(() => {
+    if (!resolved) return [];
+    return resolved.kind === "video" ? [resolved.track] : resolved.tracks;
+  }, [resolved]);
+
+  const closeStream = useCallback(() => {
+    esRef.current?.close();
+    esRef.current = null;
+  }, []);
+
+  // Close any open SSE connection when the component unmounts.
+  useEffect(() => closeStream, [closeStream]);
+
+  function subscribeToJob(jobId: string) {
+    closeStream();
+    const es = new EventSource(`/api/jobs/${jobId}/events`);
+    esRef.current = es;
+    es.onmessage = (event) => {
+      const snapshot: JobSnapshot = JSON.parse(event.data);
+      setJob(snapshot);
+      if (snapshot.status !== "running") {
+        es.close();
+        esRef.current = null;
+      }
+    };
+  }
+
+  async function handleResolve(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    setResolving(true);
+    setResolveError(null);
+    setResolved(null);
+    try {
+      const res = await fetch("/api/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: trimmed }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to resolve that URL.");
+      const result = data as ResolveResult;
+      setResolved(result);
+      const ids = result.kind === "video" ? [result.track.id] : result.tracks.map((t) => t.id);
+      setSelected(new Set(ids));
+      setStage("resolved");
+    } catch (err) {
+      setResolveError(err instanceof Error ? err.message : "Failed to resolve that URL.");
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  function toggleTrack(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setSelected((prev) =>
+      prev.size === tracks.length ? new Set() : new Set(tracks.map((t) => t.id)),
+    );
+  }
+
+  async function startDownload() {
+    if (!resolved || selected.size === 0) return;
+    setStarting(true);
+    setActionError(null);
+    try {
+      const selectedTracks = tracks.filter((t) => selected.has(t.id));
+      const title =
+        resolved.kind === "playlist" ? resolved.title : selectedTracks[0]?.title ?? "Download";
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: resolved.kind, title, tracks: selectedTracks }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to start download.");
+      setStage("job");
+      subscribeToJob(data.jobId as string);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to start download.");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function cancelJob() {
+    if (!job) return;
+    closeStream();
+    await fetch(`/api/jobs/${job.id}`, { method: "DELETE" }).catch(() => {});
+    setJob((prev) => (prev ? { ...prev, status: "canceled" } : prev));
+  }
+
+  function startOver() {
+    closeStream();
+    if (job) void fetch(`/api/jobs/${job.id}`, { method: "DELETE" }).catch(() => {});
+    setJob(null);
+    setResolved(null);
+    setResolveError(null);
+    setActionError(null);
+    setUrl("");
+    setStage("input");
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <main className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="mx-auto flex max-w-2xl flex-col gap-6 px-6 py-12">
+        <header>
+          <h1 className="text-2xl font-semibold tracking-tight">YouTube → MP3</h1>
+          <p className="mt-1 text-sm text-zinc-400">
+            Paste a playlist or single video link to download the audio as MP3.
+          </p>
+        </header>
+
+        <form onSubmit={handleResolve} className="flex gap-2">
+          <input
+            type="url"
+            required
+            placeholder="https://www.youtube.com/watch?v=... or /playlist?list=..."
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            disabled={resolving || stage === "job"}
+            className="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none placeholder:text-zinc-500 focus:border-zinc-600 disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={resolving || !url.trim() || stage === "job"}
+            className="rounded-md bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900 transition hover:bg-white disabled:opacity-40"
+          >
+            {resolving ? "Resolving…" : "Resolve"}
+          </button>
+        </form>
+        {resolveError && <p className="text-sm text-red-400">{resolveError}</p>}
+
+        {resolved && stage !== "job" && (
+          <section className="flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-medium">
+                  {resolved.kind === "playlist" ? resolved.title : "Single video"}
+                </h2>
+                <p className="text-xs text-zinc-500">
+                  {tracks.length} track{tracks.length === 1 ? "" : "s"}
+                  {resolved.kind === "playlist" && resolved.unavailableCount > 0 && (
+                    <> · {resolved.unavailableCount} unavailable (skipped)</>
+                  )}
+                </p>
+              </div>
+              {tracks.length > 1 && (
+                <button
+                  onClick={toggleAll}
+                  className="text-xs text-zinc-400 underline decoration-zinc-700 hover:text-zinc-200"
+                >
+                  {selected.size === tracks.length ? "Deselect all" : "Select all"}
+                </button>
+              )}
+            </div>
+
+            <ul className="flex max-h-96 flex-col gap-1 overflow-y-auto rounded-md border border-zinc-800 p-2">
+              {tracks.map((t) => (
+                <li key={t.id} className="flex items-center gap-3 rounded px-2 py-1.5 hover:bg-zinc-900">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(t.id)}
+                    onChange={() => toggleTrack(t.id)}
+                    className="size-4 accent-zinc-300"
+                  />
+                  {t.thumbnail && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={t.thumbnail} alt="" className="h-9 w-16 rounded object-cover" />
+                  )}
+                  <div className="flex-1 truncate">
+                    <p className="truncate text-sm">{t.title}</p>
+                    {t.uploader && <p className="truncate text-xs text-zinc-500">{t.uploader}</p>}
+                  </div>
+                  <span className="text-xs tabular-nums text-zinc-500">{formatDuration(t.duration)}</span>
+                </li>
+              ))}
+            </ul>
+
+            {actionError && <p className="text-sm text-red-400">{actionError}</p>}
+
+            <button
+              onClick={startDownload}
+              disabled={starting || selected.size === 0}
+              className="self-start rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-40"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+              {starting
+                ? "Starting…"
+                : `Download ${selected.size} track${selected.size === 1 ? "" : "s"} as MP3`}
+            </button>
+          </section>
+        )}
+
+        {job && <JobPanel job={job} onCancel={cancelJob} onStartOver={startOver} />}
+      </div>
+    </main>
+  );
+}
+
+function JobPanel({
+  job,
+  onCancel,
+  onStartOver,
+}: {
+  job: JobSnapshot;
+  onCancel: () => void;
+  onStartOver: () => void;
+}) {
+  const total = job.tracks.length;
+  const doneCount = job.tracks.filter((t) => t.status === "done").length;
+  const failedCount = job.tracks.filter((t) => t.status === "failed").length;
+  const isRunning = job.status === "running";
+  const canDownload = doneCount > 0;
+
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="font-medium">{job.title}</h2>
+          <p className="text-xs text-zinc-500">
+            {doneCount} / {total} complete
+            {failedCount > 0 && <> · {failedCount} failed</>}
+            {job.status === "canceled" && <> · canceled</>}
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+        {isRunning ? (
+          <button
+            onClick={onCancel}
+            className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-900"
           >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            Cancel
+          </button>
+        ) : (
+          <button
+            onClick={onStartOver}
+            className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-900"
           >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+            Start over
+          </button>
+        )}
+      </div>
+
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+        <div
+          className="h-full bg-emerald-500 transition-all"
+          style={{ width: `${total > 0 ? (doneCount / total) * 100 : 0}%` }}
+        />
+      </div>
+
+      <ul className="flex max-h-96 flex-col gap-1 overflow-y-auto rounded-md border border-zinc-800 p-2">
+        {job.tracks.map((t) => (
+          <TrackRow key={t.id} jobId={job.id} track={t} />
+        ))}
+      </ul>
+
+      {canDownload && (
+        <a
+          href={`/api/jobs/${job.id}/download`}
+          className="self-start rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-emerald-950 transition hover:bg-emerald-400"
+        >
+          {job.kind === "video"
+            ? "Download MP3"
+            : `Download ZIP (${doneCount} file${doneCount === 1 ? "" : "s"})`}
+        </a>
+      )}
+    </section>
   );
+}
+
+function TrackRow({ jobId, track }: { jobId: string; track: JobTrack }) {
+  return (
+    <li className="flex items-center gap-3 rounded px-2 py-1.5">
+      {track.thumbnail && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={track.thumbnail} alt="" className="h-9 w-16 rounded object-cover" />
+      )}
+      <div className="flex-1 truncate">
+        <p className="truncate text-sm">{track.title}</p>
+        <StatusLine track={track} />
+      </div>
+      {track.status === "done" ? (
+        <a
+          href={`/api/jobs/${jobId}/file/${track.id}`}
+          className="text-xs text-zinc-400 underline decoration-zinc-700 hover:text-zinc-200"
+        >
+          {formatBytes(track.fileSize) || "download"}
+        </a>
+      ) : (
+        <span className="text-xs tabular-nums text-zinc-500">{formatDuration(track.duration)}</span>
+      )}
+    </li>
+  );
+}
+
+function StatusLine({ track }: { track: JobTrack }) {
+  switch (track.status) {
+    case "pending":
+      return <p className="text-xs text-zinc-500">Waiting…</p>;
+    case "downloading":
+      return (
+        <div className="mt-1 flex items-center gap-2">
+          <div className="h-1 w-24 overflow-hidden rounded-full bg-zinc-800">
+            <div
+              className="h-full bg-sky-500 transition-all"
+              style={{ width: `${Math.max(2, track.pct)}%` }}
+            />
+          </div>
+          <span className="text-xs tabular-nums text-zinc-500">
+            {track.pct.toFixed(0)}%
+            {track.etaSeconds != null && ` · ${formatDuration(track.etaSeconds)} left`}
+          </span>
+        </div>
+      );
+    case "converting":
+      return <p className="text-xs text-sky-400">Converting to MP3…</p>;
+    case "done":
+      return <p className="text-xs text-emerald-400">Done</p>;
+    case "failed":
+      return <p className="truncate text-xs text-red-400">{track.error ?? "Failed"}</p>;
+    case "canceled":
+      return <p className="text-xs text-zinc-500">Canceled</p>;
+  }
 }

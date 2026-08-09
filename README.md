@@ -1,36 +1,63 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# YouTube → MP3
 
-## Getting Started
+A small local Next.js app: paste a YouTube playlist or single video link, pick
+which tracks you want, and download the audio as MP3 (individually, or as a
+ZIP for playlists). Tracks are tagged with title/artist metadata and embedded
+cover art.
 
-First, run the development server:
+Only use this on content you have the right to download.
+
+## Prerequisites
+
+The app shells out to [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and
+[`ffmpeg`](https://ffmpeg.org) — install both and make sure they're on your
+`PATH`:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+brew install yt-dlp ffmpeg
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Running it
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Open [http://localhost:3000](http://localhost:3000), paste a link, hit
+**Resolve**, pick your tracks, and hit **Download**.
 
-## Learn More
+- A single video link resolves to one track and downloads as `Title.mp3`.
+- A playlist link resolves to the full track list; uncheck anything you don't
+  want, then download everything selected as a `.zip`. Individual files can
+  also be downloaded from the per-track progress list once they finish.
 
-To learn more about Next.js, take a look at the following resources:
+Downloads run server-side into a temporary directory that's cleaned up once
+you download the result (or after ~30 minutes if you leave a job open).
+Nothing is written outside of `os.tmpdir()`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## If YouTube asks you to sign in / blocks downloads
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+YouTube sometimes rate-limits or challenges automated traffic with
+"Sign in to confirm you're not a bot." If that happens, pass yt-dlp your
+browser's cookies via the `YTDLP_EXTRA_ARGS` environment variable, e.g.:
 
-## Deploy on Vercel
+```bash
+YTDLP_EXTRA_ARGS="--cookies-from-browser chrome" npm run dev
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Any extra yt-dlp flags can be passed this way (space-separated).
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## How it works
+
+- `src/lib/ytdlp.ts` — spawns `yt-dlp` to resolve a URL into track metadata,
+  and to download+extract one track's audio at a time (one process per
+  track, for clean per-track progress and failure isolation).
+- `src/lib/jobs.ts` — an in-memory job store that runs selected tracks
+  through a small concurrency pool (3 at a time) and streams progress to
+  subscribers.
+- `src/app/api/**` — REST + SSE endpoints the UI talks to: resolve a URL,
+  start a job, stream its progress, cancel it, and download the finished
+  file(s).
+- `src/app/page.tsx` — the UI: URL input → track picker → live progress →
+  download.

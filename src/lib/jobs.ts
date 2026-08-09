@@ -31,6 +31,8 @@ g.__ytoJobs = jobs;
 const CONCURRENCY = 3;
 const MAX_AGE_MS = 30 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_AUTO_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 1500;
 
 export function trackFilePath(tmpDir: string, videoId: string): string {
   return path.join(tmpDir, `${videoId}.mp3`);
@@ -58,16 +60,16 @@ async function cleanupJob(job: Job) {
   await rm(job.tmpDir, { recursive: true, force: true }).catch(() => {});
 }
 
-async function runTrack(job: Job, index: number) {
-  const track = job.tracks[index];
-  if (job.controller.signal.aborted) {
-    track.status = "canceled";
-    emit(job);
-    return;
-  }
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+/** Runs one download attempt, mutating the track's live progress fields as it goes. */
+async function attemptDownload(job: Job, track: JobTrack): Promise<"done" | "canceled" | "failed"> {
   track.status = "downloading";
   track.pct = 0;
+  track.etaSeconds = undefined;
+  track.error = undefined;
   emit(job);
 
   try {
@@ -86,7 +88,6 @@ async function runTrack(job: Job, index: number) {
       },
       job.controller.signal,
     );
-    track.status = "done";
     track.pct = 100;
     try {
       const info = await stat(trackFilePath(job.tmpDir, track.id));
@@ -94,13 +95,50 @@ async function runTrack(job: Job, index: number) {
     } catch {
       // Non-fatal: file size is cosmetic.
     }
+    return "done";
   } catch (err) {
-    if (job.controller.signal.aborted) {
-      track.status = "canceled";
-    } else {
-      track.status = "failed";
-      track.error = err instanceof YtdlpError ? err.message : "Download failed.";
+    if (job.controller.signal.aborted) return "canceled";
+    track.error = err instanceof YtdlpError ? err.message : "Download failed.";
+    return "failed";
+  }
+}
+
+/**
+ * Downloads one track, automatically retrying transient failures up to
+ * MAX_AUTO_ATTEMPTS times before settling on "failed" (at which point the
+ * client offers a manual retry — see retryTrack below).
+ */
+async function runTrack(job: Job, index: number) {
+  const track = job.tracks[index];
+  if (job.controller.signal.aborted) {
+    track.status = "canceled";
+    emit(job);
+    return;
+  }
+
+  for (let attempt = 1; attempt <= MAX_AUTO_ATTEMPTS; attempt++) {
+    track.attempts = attempt;
+    const outcome = await attemptDownload(job, track);
+    track.status = outcome;
+    emit(job);
+    if (outcome !== "failed") return;
+    if (attempt < MAX_AUTO_ATTEMPTS && !job.controller.signal.aborted) {
+      await sleep(RETRY_DELAY_MS);
     }
+  }
+}
+
+function recomputeStatus(job: Job) {
+  if (job.controller.signal.aborted) {
+    job.status = "canceled";
+  } else if (job.tracks.length > 0 && job.tracks.every((t) => t.status === "failed")) {
+    job.status = "failed";
+  } else if (
+    job.tracks.some((t) => t.status === "pending" || t.status === "downloading" || t.status === "converting")
+  ) {
+    job.status = "running";
+  } else {
+    job.status = "done";
   }
   emit(job);
 }
@@ -137,14 +175,7 @@ async function runJob(job: Job) {
     pump();
   });
 
-  if (job.controller.signal.aborted) {
-    job.status = "canceled";
-  } else if (job.tracks.length > 0 && job.tracks.every((t) => t.status === "failed")) {
-    job.status = "failed";
-  } else {
-    job.status = "done";
-  }
-  emit(job);
+  recomputeStatus(job);
 }
 
 export async function createJob(
@@ -166,6 +197,7 @@ export async function createJob(
       etaSeconds: undefined,
       error: undefined,
       fileSize: undefined,
+      attempts: 0,
     })),
     createdAt: Date.now(),
     tmpDir,
@@ -214,6 +246,31 @@ export async function cancelJob(id: string): Promise<boolean> {
   emit(job);
   await cleanupJob(job);
   return true;
+}
+
+export type RetryResult = "started" | "not-found" | "not-retryable";
+
+/** Manually retries one failed track. Re-enters the same auto-retry loop as a fresh download. */
+export async function retryTrack(jobId: string, trackId: string): Promise<RetryResult> {
+  const job = jobs.get(jobId);
+  if (!job) return "not-found";
+
+  const index = job.tracks.findIndex((t) => t.id === trackId);
+  if (index === -1) return "not-found";
+
+  const track = job.tracks[index];
+  if (track.status !== "failed" || job.controller.signal.aborted) {
+    return "not-retryable";
+  }
+
+  track.status = "pending";
+  track.error = undefined;
+  track.attempts = 0;
+  job.status = "running";
+  emit(job);
+
+  void runTrack(job, index).then(() => recomputeStatus(job));
+  return "started";
 }
 
 export async function deleteJob(id: string): Promise<boolean> {

@@ -38,6 +38,8 @@ export type JobTrack = Track & {
   error: string | undefined;
   /** Byte size of the finished mp3, once known. */
   fileSize: number | undefined;
+  /** How many download attempts have been made for this track (auto-retries included). */
+  attempts: number;
 };
 
 export type JobStatus = "running" | "done" | "failed" | "canceled";

@@ -17,11 +17,18 @@ export default function Home() {
   const [starting, setStarting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
 
   const tracks: Track[] = useMemo(() => {
     if (!resolved) return [];
     return resolved.kind === "video" ? [resolved.track] : resolved.tracks;
   }, [resolved]);
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selected.size > 0 && selected.size < tracks.length;
+    }
+  }, [selected, tracks.length]);
 
   const closeStream = useCallback(() => {
     esRef.current?.close();
@@ -118,6 +125,21 @@ export default function Home() {
     setJob((prev) => (prev ? { ...prev, status: "canceled" } : prev));
   }
 
+  async function retryTrack(trackId: string) {
+    if (!job) return;
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/tracks/${trackId}/retry`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to retry that track.");
+      // The job may have already reached a terminal state and closed its SSE
+      // connection; re-subscribe so we see this track's retry progress.
+      subscribeToJob(job.id);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to retry that track.");
+    }
+  }
+
   function startOver() {
     closeStream();
     if (job) void fetch(`/api/jobs/${job.id}`, { method: "DELETE" }).catch(() => {});
@@ -174,12 +196,16 @@ export default function Home() {
                 </p>
               </div>
               {tracks.length > 1 && (
-                <button
-                  onClick={toggleAll}
-                  className="text-xs text-zinc-400 underline decoration-zinc-700 hover:text-zinc-200"
-                >
+                <label className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200">
+                  <input
+                    ref={selectAllRef}
+                    type="checkbox"
+                    checked={tracks.length > 0 && selected.size === tracks.length}
+                    onChange={toggleAll}
+                    className="size-3.5 accent-zinc-300"
+                  />
                   {selected.size === tracks.length ? "Deselect all" : "Select all"}
-                </button>
+                </label>
               )}
             </div>
 
@@ -205,8 +231,6 @@ export default function Home() {
               ))}
             </ul>
 
-            {actionError && <p className="text-sm text-red-400">{actionError}</p>}
-
             <button
               onClick={startDownload}
               disabled={starting || selected.size === 0}
@@ -219,7 +243,11 @@ export default function Home() {
           </section>
         )}
 
-        {job && <JobPanel job={job} onCancel={cancelJob} onStartOver={startOver} />}
+        {actionError && <p className="text-sm text-red-400">{actionError}</p>}
+
+        {job && (
+          <JobPanel job={job} onCancel={cancelJob} onStartOver={startOver} onRetryTrack={retryTrack} />
+        )}
       </div>
     </main>
   );
@@ -229,10 +257,12 @@ function JobPanel({
   job,
   onCancel,
   onStartOver,
+  onRetryTrack,
 }: {
   job: JobSnapshot;
   onCancel: () => void;
   onStartOver: () => void;
+  onRetryTrack: (trackId: string) => void;
 }) {
   const total = job.tracks.length;
   const doneCount = job.tracks.filter((t) => t.status === "done").length;
@@ -277,7 +307,7 @@ function JobPanel({
 
       <ul className="flex max-h-96 flex-col gap-1 overflow-y-auto rounded-md border border-zinc-800 p-2">
         {job.tracks.map((t) => (
-          <TrackRow key={t.id} jobId={job.id} track={t} />
+          <TrackRow key={t.id} jobId={job.id} track={t} onRetry={onRetryTrack} />
         ))}
       </ul>
 
@@ -295,7 +325,15 @@ function JobPanel({
   );
 }
 
-function TrackRow({ jobId, track }: { jobId: string; track: JobTrack }) {
+function TrackRow({
+  jobId,
+  track,
+  onRetry,
+}: {
+  jobId: string;
+  track: JobTrack;
+  onRetry: (trackId: string) => void;
+}) {
   return (
     <li className="flex items-center gap-3 rounded px-2 py-1.5">
       {track.thumbnail && (
@@ -313,6 +351,13 @@ function TrackRow({ jobId, track }: { jobId: string; track: JobTrack }) {
         >
           {formatBytes(track.fileSize) || "download"}
         </a>
+      ) : track.status === "failed" ? (
+        <button
+          onClick={() => onRetry(track.id)}
+          className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-900"
+        >
+          Retry
+        </button>
       ) : (
         <span className="text-xs tabular-nums text-zinc-500">{formatDuration(track.duration)}</span>
       )}
@@ -336,11 +381,16 @@ function StatusLine({ track }: { track: JobTrack }) {
           <span className="text-xs tabular-nums text-zinc-500">
             {track.pct.toFixed(0)}%
             {track.etaSeconds != null && ` · ${formatDuration(track.etaSeconds)} left`}
+            {track.attempts > 1 && ` · retry ${track.attempts}`}
           </span>
         </div>
       );
     case "converting":
-      return <p className="text-xs text-sky-400">Converting to MP3…</p>;
+      return (
+        <p className="text-xs text-sky-400">
+          Converting to MP3…{track.attempts > 1 && ` (retry ${track.attempts})`}
+        </p>
+      );
     case "done":
       return <p className="text-xs text-emerald-400">Done</p>;
     case "failed":

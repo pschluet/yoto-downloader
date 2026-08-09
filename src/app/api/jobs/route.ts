@@ -11,10 +11,19 @@ type JobRequestBody = {
   tracks?: unknown;
 };
 
+// YouTube video IDs are always 11 chars from this alphabet. Enforcing that
+// here — not just "is a string" — keeps unvalidated client input from ever
+// reaching a filesystem path join in trackFilePath().
+const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
 function isValidTrack(t: unknown): t is Track {
   if (!t || typeof t !== "object") return false;
   const track = t as Record<string, unknown>;
-  return typeof track.id === "string" && typeof track.title === "string";
+  return (
+    typeof track.id === "string" &&
+    VIDEO_ID_RE.test(track.id) &&
+    typeof track.title === "string"
+  );
 }
 
 export async function POST(request: Request) {

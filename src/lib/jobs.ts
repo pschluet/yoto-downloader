@@ -233,10 +233,15 @@ export function subscribe(
   return () => job.subscribers.delete(cb);
 }
 
-export async function cancelJob(id: string): Promise<boolean> {
-  const job = jobs.get(id);
-  if (!job) return false;
+/**
+ * Aborts a job's in-flight work. If the job hadn't already reached a terminal
+ * state, marks it (and any track that never got to run) "canceled" and emits
+ * — leaving an already-finished job's status alone so deleting a completed
+ * job for cleanup doesn't stomp its real outcome.
+ */
+function markCanceled(job: Job) {
   job.controller.abort();
+  if (job.status !== "running") return;
   job.status = "canceled";
   for (const track of job.tracks) {
     if (track.status === "pending" || track.status === "downloading" || track.status === "converting") {
@@ -244,6 +249,12 @@ export async function cancelJob(id: string): Promise<boolean> {
     }
   }
   emit(job);
+}
+
+export async function cancelJob(id: string): Promise<boolean> {
+  const job = jobs.get(id);
+  if (!job) return false;
+  markCanceled(job);
   await cleanupJob(job);
   return true;
 }
@@ -269,14 +280,14 @@ export async function retryTrack(jobId: string, trackId: string): Promise<RetryR
   job.status = "running";
   emit(job);
 
-  void runTrack(job, index).then(() => recomputeStatus(job));
+  void runTrack(job, index).finally(() => recomputeStatus(job));
   return "started";
 }
 
 export async function deleteJob(id: string): Promise<boolean> {
   const job = jobs.get(id);
   if (!job) return false;
-  job.controller.abort();
+  markCanceled(job);
   await cleanupJob(job);
   jobs.delete(id);
   return true;
@@ -286,7 +297,7 @@ function sweep() {
   const now = Date.now();
   for (const [id, job] of jobs) {
     if (now - job.createdAt > MAX_AGE_MS) {
-      job.controller.abort();
+      markCanceled(job);
       void cleanupJob(job).finally(() => jobs.delete(id));
     }
   }

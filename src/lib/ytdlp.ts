@@ -17,7 +17,7 @@ const YOUTUBE_HOST_RE = /(^|\.)youtube\.com$|(^|\.)youtu\.be$|(^|\.)music\.youtu
 export function isYoutubeUrl(input: string): boolean {
   try {
     const u = new URL(input);
-    return YOUTUBE_HOST_RE.test(u.hostname);
+    return (u.protocol === "http:" || u.protocol === "https:") && YOUTUBE_HOST_RE.test(u.hostname);
   } catch {
     return false;
   }

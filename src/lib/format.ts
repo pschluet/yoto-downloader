@@ -23,7 +23,7 @@ export function formatBytes(bytes: number | undefined): string {
   return `${value.toFixed(1)} ${units[unit]}`;
 }
 
-const ILLEGAL_FILENAME_CHARS = /[/\:*?"<>|\x00-\x1f]/g;
+const ILLEGAL_FILENAME_CHARS = /[\\/:*?"<>|\x00-\x1f]/g;
 
 /** Turn an arbitrary video title into a filesystem/zip-safe file name (no extension). */
 export function sanitizeFilename(name: string): string {
@@ -41,11 +41,16 @@ export function sanitizeFilename(name: string): string {
  * to use as sibling file names / zip entries.
  */
 export function dedupeFilenames(names: string[]): string[] {
-  const seen = new Map<string, number>();
+  const used = new Set<string>();
   return names.map((name) => {
-    const count = seen.get(name) ?? 0;
-    seen.set(name, count + 1);
-    return count === 0 ? name : `${name} (${count + 1})`;
+    let candidate = name;
+    let suffix = 2;
+    while (used.has(candidate)) {
+      candidate = `${name} (${suffix})`;
+      suffix++;
+    }
+    used.add(candidate);
+    return candidate;
   });
 }
 

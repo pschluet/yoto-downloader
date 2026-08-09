@@ -1,0 +1,19 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        YTDLP_VERSION: ${YTDLP_VERSION:-2026.03.17}
+    ports:
+      - "3000:3000"
+    environment:
+      - YTDLP_EXTRA_ARGS=${YTDLP_EXTRA_ARGS:-}
+    # If YouTube challenges you with "Sign in to confirm you're not a bot",
+    # there's no browser profile inside the container for --cookies-from-browser
+    # to read. Instead, export your browser's cookies to a cookies.txt file,
+    # uncomment the mount below, and set:
+    #   YTDLP_EXTRA_ARGS=--cookies /cookies.txt
+    # (e.g. in a .env file next to this one, or inline before `docker compose up`).
+    # volumes:
+    #   - ./cookies.txt:/cookies.txt:ro
+    restart: unless-stopped

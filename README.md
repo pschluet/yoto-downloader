@@ -36,17 +36,61 @@ Downloads run server-side into a temporary directory that's cleaned up once
 you download the result (or after ~30 minutes if you leave a job open).
 Nothing is written outside of `os.tmpdir()`.
 
+## Running it with Docker
+
+Skips the `yt-dlp`/`ffmpeg` host install entirely — both are baked into the
+image.
+
+```bash
+npm run docker:build   # docker compose build
+npm run docker:up      # docker compose up -d
+```
+
+Then open [http://localhost:3000](http://localhost:3000). Bring it down with
+`npm run docker:down`, or tail logs with `npm run docker:logs`.
+
+The `yt-dlp` binary is **pinned** to a specific release (see `YTDLP_VERSION`
+at the top of the `Dockerfile`) rather than always fetching the latest —
+builds stay reproducible, but since YouTube changes often enough to break
+older yt-dlp releases, you may need to bump it and rebuild:
+
+```bash
+YTDLP_VERSION=2026.06.01 docker compose build
+```
+
+(or just edit the default in the `Dockerfile` / `docker-compose.yml`).
+
+The `--cookies-from-browser` trick below doesn't work in a container — there's
+no browser profile to read. Instead, export your cookies to a `cookies.txt`
+file, uncomment the volume mount in `docker-compose.yml`, and set
+`YTDLP_EXTRA_ARGS=--cookies /cookies.txt` (e.g. in a `.env` file next to
+`docker-compose.yml`).
+
 ## If YouTube asks you to sign in / blocks downloads
 
 YouTube sometimes rate-limits or challenges automated traffic with
-"Sign in to confirm you're not a bot." If that happens, pass yt-dlp your
-browser's cookies via the `YTDLP_EXTRA_ARGS` environment variable, e.g.:
+"Sign in to confirm you're not a bot." If that happens (outside Docker), pass
+yt-dlp your browser's cookies via the `YTDLP_EXTRA_ARGS` environment
+variable, e.g.:
 
 ```bash
 YTDLP_EXTRA_ARGS="--cookies-from-browser chrome" npm run dev
 ```
 
 Any extra yt-dlp flags can be passed this way (space-separated).
+
+## Testing
+
+```bash
+npm test              # vitest run
+npm run test:watch    # vitest, re-runs on change
+npm run test:coverage # vitest run --coverage
+```
+
+Covers `src/lib/**` (mocking `node:child_process` for the yt-dlp wrapper, and
+`@/lib/ytdlp` for the job store, so nothing here actually shells out or hits
+the network), every API route (called directly with a real `Request`), and
+the UI (jsdom + Testing Library, with a fake `EventSource`).
 
 ## How it works
 
@@ -61,3 +105,6 @@ Any extra yt-dlp flags can be passed this way (space-separated).
   file(s).
 - `src/app/page.tsx` — the UI: URL input → track picker → live progress →
   download.
+- `Dockerfile` / `docker-compose.yml` — multi-stage build (Next's standalone
+  output, so the runtime image doesn't carry all of `node_modules`) with a
+  pinned `yt-dlp` binary and `ffmpeg` baked in, running as a non-root user.

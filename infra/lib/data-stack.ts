@@ -29,7 +29,12 @@ export class DataStack extends cdk.Stack {
     this.bucket = new s3.Bucket(this, "FilesBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
-      lifecycleRules: [{ expiration: cdk.Duration.days(1) }],
+      lifecycleRules: [
+        // Scoped to jobs/ (see src/lib/storage.ts's objectKey) so it does NOT
+        // sweep the admin-managed config/cookies.txt (src/lib/cookies.ts),
+        // which must persist indefinitely.
+        { prefix: "jobs/", expiration: cdk.Duration.days(1) },
+      ],
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
     });

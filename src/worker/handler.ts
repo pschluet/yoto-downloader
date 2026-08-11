@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SQSEvent, SQSHandler, SQSBatchResponse, SQSBatchItemFailure } from "aws-lambda";
 import { isCanceled, updateTrack } from "@/lib/db";
+import { invalidateCookies } from "@/lib/cookies";
 import { uploadTrackFile } from "@/lib/storage";
 import { downloadTrack, YtdlpError, type DownloadProgress } from "@/lib/ytdlp";
 import type { TrackMessage } from "@/lib/queue";
@@ -101,6 +102,12 @@ async function processTrack({ jobId, trackIndex, videoId }: TrackMessage): Promi
           ? err.message
           : "Download failed.";
       await updateTrack(jobId, trackIndex, { status: "failed", error: message });
+      // Stale cookies are the most likely cause of a bot check, and an admin
+      // may have just uploaded fresh ones — drop the cached copy so the next
+      // attempt re-reads S3 instead of reusing what just failed.
+      if (err instanceof YtdlpError && err.botCheck) {
+        invalidateCookies();
+      }
       if (attempt < MAX_AUTO_ATTEMPTS) {
         await sleep(RETRY_DELAY_MS);
       }

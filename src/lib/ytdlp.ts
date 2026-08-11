@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { withCookieArgs } from "@/lib/cookies";
 import type { ResolveResult, Track } from "@/types";
 
 const YTDLP_BIN = process.env.YTDLP_PATH || "yt-dlp";
@@ -10,6 +11,20 @@ function extraArgs(): string[] {
   if (!raw) return [];
   // Simple whitespace split is enough for the flag-based args people set here.
   return raw.split(/\s+/).filter(Boolean);
+}
+
+// A locally-set --cookies/--cookies-from-browser (e.g. docker-compose's mounted
+// cookies.txt) always wins over the admin-managed S3 copy — this keeps the
+// local/docker flow byte-identical and avoids ever passing both flags to yt-dlp.
+const COOKIE_OVERRIDE_RE = /(^|\s)--cookies(-from-browser)?(\s|=|$)/;
+function hasLocalCookieOverride(): boolean {
+  return COOKIE_OVERRIDE_RE.test(process.env.YTDLP_EXTRA_ARGS ?? "");
+}
+
+/** Runs `fn` with the yt-dlp cookie args to use: the admin-managed S3 cookie
+ *  jar (see src/lib/cookies.ts), or none if a local override is set. */
+function withYtdlpCookieArgs<T>(fn: (args: string[]) => Promise<T>): Promise<T> {
+  return hasLocalCookieOverride() ? fn([]) : withCookieArgs(fn);
 }
 
 const YOUTUBE_HOST_RE = /(^|\.)youtube\.com$|(^|\.)youtu\.be$|(^|\.)music\.youtube\.com$/i;
@@ -27,6 +42,9 @@ export class YtdlpError extends Error {
   constructor(
     message: string,
     public readonly stderrTail: string,
+    /** True for YouTube's "confirm you're not a bot" challenge — lets callers
+     *  react (e.g. drop cached cookies before retrying) without string-matching. */
+    public readonly botCheck = false,
   ) {
     super(message);
     this.name = "YtdlpError";
@@ -36,9 +54,10 @@ export class YtdlpError extends Error {
 function friendlyError(stderrTail: string, fallback: string): YtdlpError {
   if (/sign in to confirm you.?re not a bot/i.test(stderrTail)) {
     return new YtdlpError(
-      "YouTube is asking to confirm you're not a bot. Set the YTDLP_EXTRA_ARGS " +
-        'env var to something like --cookies-from-browser chrome and restart the app.',
+      "YouTube is asking to confirm you're not a bot. An admin needs to upload " +
+        "fresh YouTube cookies on the Admin page.",
       stderrTail,
+      true,
     );
   }
   if (/private video|video unavailable|this video is unavailable/i.test(stderrTail)) {
@@ -59,33 +78,35 @@ function pushTail(tail: string[], chunk: string) {
 
 /** Resolve a YouTube URL (video or playlist) into track metadata, without downloading. */
 export async function resolve(url: string): Promise<ResolveResult> {
-  const args = ["-J", "--flat-playlist", "--no-warnings", ...extraArgs(), url];
+  return withYtdlpCookieArgs(async (cookieArgs) => {
+    const args = ["-J", "--flat-playlist", "--no-warnings", ...cookieArgs, ...extraArgs(), url];
 
-  const stdout: Buffer[] = [];
-  const stderrTail: string[] = [];
+    const stdout: Buffer[] = [];
+    const stderrTail: string[] = [];
 
-  const exitCode = await new Promise<number>((resolvePromise, reject) => {
-    // turbopackIgnore: this is a PATH lookup for an external binary, not a
-    // project file — tracing it would pull the whole repo into the bundle.
-    const child = spawn(/* turbopackIgnore: true */ YTDLP_BIN, args);
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => pushTail(stderrTail, chunk.toString("utf8")));
-    child.on("error", (err) => reject(err));
-    child.on("close", (code) => resolvePromise(code ?? 1));
+    const exitCode = await new Promise<number>((resolvePromise, reject) => {
+      // turbopackIgnore: this is a PATH lookup for an external binary, not a
+      // project file — tracing it would pull the whole repo into the bundle.
+      const child = spawn(/* turbopackIgnore: true */ YTDLP_BIN, args);
+      child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+      child.stderr.on("data", (chunk: Buffer) => pushTail(stderrTail, chunk.toString("utf8")));
+      child.on("error", (err) => reject(err));
+      child.on("close", (code) => resolvePromise(code ?? 1));
+    });
+
+    if (exitCode !== 0) {
+      throw friendlyError(stderrTail.join("\n"), "Failed to resolve that URL.");
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.concat(stdout).toString("utf8"));
+    } catch {
+      throw new YtdlpError("yt-dlp returned unexpected output.", stderrTail.join("\n"));
+    }
+
+    return toResolveResult(parsed);
   });
-
-  if (exitCode !== 0) {
-    throw friendlyError(stderrTail.join("\n"), "Failed to resolve that URL.");
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.concat(stdout).toString("utf8"));
-  } catch {
-    throw new YtdlpError("yt-dlp returned unexpected output.", stderrTail.join("\n"));
-  }
-
-  return toResolveResult(parsed);
 }
 
 type RawEntry = {
@@ -159,73 +180,84 @@ export type DownloadProgress =
  * metadata and cover art. One yt-dlp process per track keeps progress reporting
  * and failure isolation unambiguous.
  */
-export function downloadTrack(
+export async function downloadTrack(
   videoId: string,
   tmpDir: string,
   onProgress: (progress: DownloadProgress) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const args = [
-    "-x",
-    "--audio-format",
-    "mp3",
-    "--audio-quality",
-    "0",
-    "--embed-metadata",
-    "--embed-thumbnail",
-    "--no-playlist",
-    "--no-part",
-    "--no-warnings",
-    "-o",
-    `${tmpDir}/%(id)s.%(ext)s`,
-    "--newline",
-    "--progress-delta",
-    "0.5",
-    "--progress-template",
-    "download:@P %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s %(progress.eta)s",
-    "--progress-template",
-    "postprocess:@C %(progress.status)s",
-    ...extraArgs(),
-    `https://www.youtube.com/watch?v=${videoId}`,
-  ];
+  // Checked here too (before ever touching S3 for cookies), not just inside
+  // the promise executor below — an already-canceled download shouldn't cost
+  // a cookie fetch.
+  if (signal.aborted) {
+    throw new YtdlpError("Canceled.", "");
+  }
 
-  return new Promise<void>((resolvePromise, reject) => {
-    if (signal.aborted) {
-      reject(new YtdlpError("Canceled.", ""));
-      return;
-    }
+  return withYtdlpCookieArgs(
+    (cookieArgs) =>
+      new Promise<void>((resolvePromise, reject) => {
+        if (signal.aborted) {
+          reject(new YtdlpError("Canceled.", ""));
+          return;
+        }
 
-    const child = spawn(/* turbopackIgnore: true */ YTDLP_BIN, args, {
-      signal,
-      killSignal: "SIGKILL",
-    });
-    const stderrTail: string[] = [];
-    let stdoutRemainder = "";
+        const args = [
+          "-x",
+          "--audio-format",
+          "mp3",
+          "--audio-quality",
+          "0",
+          "--embed-metadata",
+          "--embed-thumbnail",
+          "--no-playlist",
+          "--no-part",
+          "--no-warnings",
+          "-o",
+          `${tmpDir}/%(id)s.%(ext)s`,
+          "--newline",
+          "--progress-delta",
+          "0.5",
+          "--progress-template",
+          "download:@P %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s %(progress.eta)s",
+          "--progress-template",
+          "postprocess:@C %(progress.status)s",
+          ...cookieArgs,
+          ...extraArgs(),
+          `https://www.youtube.com/watch?v=${videoId}`,
+        ];
 
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutRemainder += chunk.toString("utf8");
-      const lines = stdoutRemainder.split("\n");
-      stdoutRemainder = lines.pop() ?? "";
-      for (const line of lines) handleProgressLine(line, onProgress);
-    });
+        const child = spawn(/* turbopackIgnore: true */ YTDLP_BIN, args, {
+          signal,
+          killSignal: "SIGKILL",
+        });
+        const stderrTail: string[] = [];
+        let stdoutRemainder = "";
 
-    child.stderr.on("data", (chunk: Buffer) => pushTail(stderrTail, chunk.toString("utf8")));
+        child.stdout.on("data", (chunk: Buffer) => {
+          stdoutRemainder += chunk.toString("utf8");
+          const lines = stdoutRemainder.split("\n");
+          stdoutRemainder = lines.pop() ?? "";
+          for (const line of lines) handleProgressLine(line, onProgress);
+        });
 
-    child.on("error", (err) => {
-      if (signal.aborted) reject(new YtdlpError("Canceled.", ""));
-      else reject(err);
-    });
+        child.stderr.on("data", (chunk: Buffer) => pushTail(stderrTail, chunk.toString("utf8")));
 
-    child.on("close", (code) => {
-      if (signal.aborted) {
-        reject(new YtdlpError("Canceled.", ""));
-      } else if (code === 0) {
-        resolvePromise();
-      } else {
-        reject(friendlyError(stderrTail.join("\n"), "Download failed."));
-      }
-    });
-  });
+        child.on("error", (err) => {
+          if (signal.aborted) reject(new YtdlpError("Canceled.", ""));
+          else reject(err);
+        });
+
+        child.on("close", (code) => {
+          if (signal.aborted) {
+            reject(new YtdlpError("Canceled.", ""));
+          } else if (code === 0) {
+            resolvePromise();
+          } else {
+            reject(friendlyError(stderrTail.join("\n"), "Download failed."));
+          }
+        });
+      }),
+  );
 }
 
 function handleProgressLine(

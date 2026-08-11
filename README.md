@@ -18,10 +18,12 @@ Only use this on content you have the right to download.
   DynamoDB.
 - **DynamoDB** — job/track state (replaces the in-memory store an
   always-on server would use).
-- **S3** — finished files. Single-track downloads redirect to a presigned
-  URL; playlist ZIPs are built by streaming each track in from S3.
+- **S3** — finished files, plus a single admin-managed `config/cookies.txt`
+  (see below). Single-track downloads redirect to a presigned URL; playlist
+  ZIPs are built by streaming each track in from S3.
 - **Cognito** — username/password auth (custom login form, no Hosted UI).
-  An `/admin` page lets the admin create further users.
+  An `/admin` page lets the admin create further users and manage the
+  YouTube cookies yt-dlp uses.
 - **CDK** (`infra/`) — all of the above, plus the CloudFront distribution,
   ACM cert, and Route53 record.
 
@@ -93,9 +95,30 @@ YTDLP_VERSION=2026.06.01 npm run infra:deploy
 ```
 
 There's no `--cookies-from-browser` equivalent on Lambda (no browser
-profile) — if YouTube challenges the worker with "Sign in to confirm you're
-not a bot," export cookies to a file, put it in S3, and have the worker pull
-it down and pass `--cookies` to yt-dlp instead.
+profile). If YouTube challenges either Lambda with "Sign in to confirm
+you're not a bot," fix it from the running app instead of redeploying:
+
+1. Export a `cookies.txt` from a real, signed-in YouTube session (a
+   throwaway Google account, not your personal one — a cookie jar grants
+   full access to whatever account it came from). Any Netscape-format
+   cookie-export browser extension works.
+2. On the **Admin** page, paste its contents or choose the file, then **Save
+   cookies**. This writes a single object, `config/cookies.txt`, to the
+   FilesBucket (deliberately outside the `jobs/` prefix the bucket's 1-day
+   lifecycle rule expires — see `infra/lib/data-stack.ts`).
+3. Click **Test** to run a real resolve against a known video and confirm
+   YouTube accepts the cookies. Note this only exercises the *web* Lambda —
+   the worker Lambda has its own scoped `s3:GetObject` grant on `config/*`
+   (`infra/lib/worker-stack.ts`), so a passing Test doesn't guarantee actual
+   track downloads work if that grant hasn't deployed yet.
+
+Both Lambdas (`src/lib/cookies.ts`) memoize the blob in memory for up to a
+minute and give yt-dlp its own throwaway `/tmp` copy per run, since yt-dlp
+rewrites the cookie jar on exit and that refreshed copy is **not** written
+back to S3 — when the bot check reappears (YouTube's cookies expire
+periodically), re-upload rather than expecting it to self-heal. A locally
+set `YTDLP_EXTRA_ARGS=--cookies …` (e.g. via `docker-compose.yml`) always
+takes precedence over the S3 copy.
 
 ## Deploying to AWS
 
@@ -135,6 +158,11 @@ npm run infra:diff     # review first
 npm run infra:deploy
 ```
 
+`YotoDataStack`'s FilesBucket has `RemovalPolicy.DESTROY` +
+`autoDeleteObjects` — destroying that stack loses the admin-uploaded
+`config/cookies.txt` along with every job file, so re-upload cookies from
+the Admin page afterward.
+
 ### First login
 
 The initial admin (`paul@paulschlueter.com`, provisioned by a CDK custom
@@ -154,17 +182,26 @@ npm run test:coverage # vitest run --coverage
 
 Covers `src/lib/**` (mocking the AWS SDK clients, `node:child_process` for
 the yt-dlp wrapper, and Cognito's REST API via `fetch` — nothing here
-actually hits AWS or the network), every API route and the auth
-proxy/middleware (called directly with a real `Request`), the worker
-handler (mocking `downloadTrack`, exercising the real retry loop), and the
-UI (jsdom + Testing Library, with a fake `EventSource`).
+actually hits AWS or the network, including `src/lib/cookies.ts`'s S3
+reads/writes and cache TTLs), every API route and the auth
+proxy/middleware (called directly with a real `Request`, including the
+`/api/admin/cookies*` routes), the worker handler (mocking `downloadTrack`,
+exercising the real retry loop, including that a bot-check failure drops
+the cached cookie jar), and the UI (jsdom + Testing Library, with a fake
+`EventSource`, and file-upload coverage for `AdminCookiesPanel`).
 
 ## How it works
 
 - `src/lib/ytdlp.ts` — spawns `yt-dlp` to resolve a URL into track metadata,
   and to download+extract one track's audio (progress via `@P`/`@C` stdout
-  sentinels, cancellation via `AbortSignal`). Unchanged by the AWS move —
-  it's called the same way from the worker Lambda as it would be anywhere.
+  sentinels, cancellation via `AbortSignal`). It's called the same way from
+  the worker Lambda as it would be anywhere, except both entry points now
+  pull the admin-managed cookie jar in via `src/lib/cookies.ts` first.
+- `src/lib/cookies.ts` — the admin-managed YouTube cookies: reads/writes
+  `config/cookies.txt` in S3, memoizes it in memory for up to a minute, and
+  hands `ytdlp.ts` a throwaway per-run `/tmp` copy (never a shared path,
+  since yt-dlp rewrites the jar on exit). Degrades to "no cookies" rather
+  than throwing if the bucket/grant isn't there yet.
 - `src/lib/db.ts` / `storage.ts` / `queue.ts` — DynamoDB, S3, and SQS
   helpers. `db.ts` derives a job's overall status from its tracks' statuses
   at *read* time rather than storing it, so concurrent per-track worker
@@ -186,6 +223,9 @@ UI (jsdom + Testing Library, with a fake `EventSource`).
   (middleware) — `src/lib/auth-admin.ts` is the one place that needs real
   IAM credentials, for the privileged `AdminCreateUser`/`AdminAddUserToGroup`
   calls behind `/admin`.
+- `src/app/admin/AdminCookiesPanel.tsx` + `src/app/api/admin/cookies*` —
+  the cookie upload/status/test UI and its routes, gated the same
+  `x-user-groups` way as the users panel.
 - `src/app/page.tsx` — the UI: URL input → track picker → live progress →
   download.
 - `Dockerfile` — the web Lambda's image: Next's standalone output plus the

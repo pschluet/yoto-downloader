@@ -8,6 +8,7 @@ import type { DownloadProgress } from "@/lib/ytdlp";
 
 vi.mock("@/lib/db", () => ({ isCanceled: vi.fn(), updateTrack: vi.fn() }));
 vi.mock("@/lib/storage", () => ({ uploadTrackFile: vi.fn() }));
+vi.mock("@/lib/cookies", () => ({ invalidateCookies: vi.fn() }));
 vi.mock("@/lib/ytdlp", async () => {
   const actual = await vi.importActual<typeof import("@/lib/ytdlp")>("@/lib/ytdlp");
   return { ...actual, downloadTrack: vi.fn() };
@@ -15,6 +16,7 @@ vi.mock("@/lib/ytdlp", async () => {
 
 import { isCanceled, updateTrack } from "@/lib/db";
 import { uploadTrackFile } from "@/lib/storage";
+import { invalidateCookies } from "@/lib/cookies";
 import { downloadTrack, YtdlpError } from "@/lib/ytdlp";
 import { handler } from "./handler";
 
@@ -22,6 +24,7 @@ const mockIsCanceled = vi.mocked(isCanceled);
 const mockUpdateTrack = vi.mocked(updateTrack);
 const mockUploadTrackFile = vi.mocked(uploadTrackFile);
 const mockDownloadTrack = vi.mocked(downloadTrack);
+const mockInvalidateCookies = vi.mocked(invalidateCookies);
 
 const noopContext = {} as Context;
 const noopCallback = () => {};
@@ -46,6 +49,7 @@ beforeEach(() => {
   mockUpdateTrack.mockReset().mockResolvedValue(undefined);
   mockUploadTrackFile.mockReset().mockResolvedValue(undefined);
   mockDownloadTrack.mockReset();
+  mockInvalidateCookies.mockReset();
 });
 
 afterEach(async () => {
@@ -103,6 +107,20 @@ describe("worker handler", () => {
       error: "boom",
     });
     expect(mockUploadTrackFile).not.toHaveBeenCalled();
+    // Not a bot check, so the cached cookie jar (if any) is left alone.
+    expect(mockInvalidateCookies).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it("drops the cached cookie jar after a bot-check failure, so the retry re-reads S3", async () => {
+    mockDownloadTrack.mockRejectedValue(
+      new YtdlpError("YouTube is asking to confirm you're not a bot.", "", true),
+    );
+
+    await handler(sqsEvent({ jobId: "job-1", trackIndex: 0, videoId: "bad" }), noopContext, noopCallback);
+
+    expect(mockDownloadTrack).toHaveBeenCalledTimes(2);
+    // Once per failed attempt (both attempts fail the same way here).
+    expect(mockInvalidateCookies).toHaveBeenCalledTimes(2);
   }, 10_000);
 
   it("succeeds on the second attempt without a third", async () => {

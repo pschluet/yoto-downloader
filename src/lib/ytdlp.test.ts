@@ -4,12 +4,22 @@ import { closeWith, createFakeChild, writeStderr, writeStdout } from "@/test/hel
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 
+// Synchronous passthrough: no cookies configured, so args are unaffected and
+// spawn still happens synchronously within each test's call stack (an async
+// function body runs synchronously up to its first real await/suspension).
+const { mockWithCookieArgs } = vi.hoisted(() => ({
+  mockWithCookieArgs: vi.fn((fn: (args: string[]) => unknown) => fn([])),
+}));
+vi.mock("@/lib/cookies", () => ({ withCookieArgs: mockWithCookieArgs }));
+
 import { downloadTrack, isYoutubeUrl, resolve, YtdlpError } from "@/lib/ytdlp";
 
 const mockSpawn = vi.mocked(spawn);
 
 beforeEach(() => {
   mockSpawn.mockReset();
+  mockWithCookieArgs.mockClear();
+  mockWithCookieArgs.mockImplementation((fn: (args: string[]) => unknown) => fn([]));
   delete process.env.YTDLP_EXTRA_ARGS;
 });
 
@@ -72,6 +82,32 @@ describe("resolve", () => {
       "--no-warnings",
       "--cookies-from-browser",
       "chrome",
+      "https://www.youtube.com/watch?v=abc",
+    ]);
+    // A local override wins outright — the admin-managed S3 cookie jar is
+    // never even fetched.
+    expect(mockWithCookieArgs).not.toHaveBeenCalled();
+
+    writeStdout(child, JSON.stringify({ _type: "video", id: "abc", title: "T", duration: 1 }));
+    closeWith(child, 0);
+    await promise;
+  });
+
+  it("splices the admin-managed cookie jar's args in before extraArgs and the url", async () => {
+    mockWithCookieArgs.mockImplementation((fn: (args: string[]) => unknown) =>
+      fn(["--cookies", "/tmp/yt-cookies.txt"]),
+    );
+    const child = createFakeChild();
+    mockSpawn.mockReturnValue(child as never);
+
+    const promise = resolve("https://www.youtube.com/watch?v=abc");
+    const [, args] = mockSpawn.mock.calls[0];
+    expect(args).toEqual([
+      "-J",
+      "--flat-playlist",
+      "--no-warnings",
+      "--cookies",
+      "/tmp/yt-cookies.txt",
       "https://www.youtube.com/watch?v=abc",
     ]);
 
@@ -180,7 +216,7 @@ describe("resolve", () => {
     await expect(promise).rejects.toThrow(/unexpected output/i);
   });
 
-  it("maps a bot-check stderr message to a friendly error", async () => {
+  it("maps a bot-check stderr message to a friendly error pointing at the Admin page", async () => {
     const child = createFakeChild();
     mockSpawn.mockReturnValue(child as never);
     const promise = resolve("https://www.youtube.com/watch?v=abc");
@@ -188,7 +224,14 @@ describe("resolve", () => {
     writeStderr(child, "ERROR: Sign in to confirm you're not a bot\n");
     closeWith(child, 1);
 
-    await expect(promise).rejects.toThrow(/YTDLP_EXTRA_ARGS/);
+    await expect(promise).rejects.toThrow(/admin page/i);
+    let error: YtdlpError | undefined;
+    try {
+      await promise;
+    } catch (err) {
+      error = err as YtdlpError;
+    }
+    expect(error?.botCheck).toBe(true);
   });
 
   it("maps a private-video stderr message to a friendly error", async () => {
@@ -274,6 +317,21 @@ describe("downloadTrack", () => {
     expect(args.indexOf("--cookies")).toBeGreaterThan(-1);
     expect(args.indexOf("--cookies")).toBeLessThan(args.indexOf(url));
     expect(args[args.indexOf("--cookies") + 1]).toBe("/cookies.txt");
+    // A local override wins outright — the admin-managed S3 cookie jar is
+    // never even fetched.
+    expect(mockWithCookieArgs).not.toHaveBeenCalled();
+  });
+
+  it("splices the admin-managed cookie jar's args in before extraArgs and the url", () => {
+    mockWithCookieArgs.mockImplementation((fn: (args: string[]) => unknown) =>
+      fn(["--cookies", "/tmp/yt-cookies.txt"]),
+    );
+    start();
+    const [, args] = mockSpawn.mock.calls[0];
+    const url = "https://www.youtube.com/watch?v=videoId1";
+    expect(args.indexOf("--cookies")).toBeGreaterThan(-1);
+    expect(args.indexOf("--cookies")).toBeLessThan(args.indexOf(url));
+    expect(args[args.indexOf("--cookies") + 1]).toBe("/tmp/yt-cookies.txt");
   });
 
   it("parses download progress, clamping pct at 100 and passing NA fields through as undefined", async () => {

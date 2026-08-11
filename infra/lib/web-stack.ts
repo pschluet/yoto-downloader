@@ -54,7 +54,9 @@ export class WebStack extends cdk.Stack {
     });
 
     props.table.grantReadWriteData(this.function);
-    props.bucket.grantReadWrite(this.function); // read: presigned URLs + zip streaming; write: n/a here, kept simple
+    // read: presigned URLs + zip streaming + admin cookie status/test (src/lib/cookies.ts);
+    // write: admin cookie upload/delete (config/cookies.txt).
+    props.bucket.grantReadWrite(this.function);
     props.queue.grantSendMessages(this.function);
 
     // Admin* Cognito APIs are privileged — scope tightly to this one pool.

@@ -25,11 +25,15 @@ services:
       - YTDLP_EXTRA_ARGS=${YTDLP_EXTRA_ARGS:-}
     # If YouTube challenges you with "Sign in to confirm you're not a bot",
     # there's no browser profile inside the container for --cookies-from-browser
-    # to read. Instead, export your browser's cookies to a cookies.txt file,
-    # uncomment the mount below, and set:
+    # to read. The deployed app manages this via an admin-uploaded cookies.txt
+    # in S3 (see src/lib/cookies.ts and the README's "Running it with Docker"
+    # section), but a local override still always wins: export your browser's
+    # cookies to a cookies.txt file, uncomment the mount below, and set:
     #   YTDLP_EXTRA_ARGS=--cookies /cookies.txt
     # volumes:
-    #   - ./cookies.txt:/cookies.txt:ro
+    #   - ./cookies.txt:/cookies.txt
+    # Deliberately NOT :ro — yt-dlp rewrites the cookie jar on exit, and a
+    # read-only bind mount would make that write fail.
     restart: unless-stopped
 
   worker:

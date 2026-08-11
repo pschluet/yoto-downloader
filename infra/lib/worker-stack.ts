@@ -52,5 +52,8 @@ export class WorkerStack extends cdk.Stack {
 
     props.table.grantReadWriteData(fn);
     props.bucket.grantWrite(fn);
+    // Read-only, and only under config/ — the worker needs the admin-uploaded
+    // cookies.txt (see src/lib/cookies.ts) but has no business reading job files.
+    props.bucket.grantRead(fn, "config/*");
   }
 }

@@ -77,20 +77,37 @@ function friendlyError(stderrTail: string, fallback: string): YtdlpError {
   return new YtdlpError(fallback, stderrTail);
 }
 
-const STDERR_TAIL_LINES = 20;
+// Toggle via `aws lambda update-function-configuration` (no redeploy needed)
+// when diagnosing a yt-dlp failure that the normal 20-line tail doesn't
+// explain — trades quieter logs for a full --verbose trace.
+function debugVerbose(): boolean {
+  return process.env.YTDLP_DEBUG_VERBOSE === "1";
+}
+
+function stderrTailLimit(): number {
+  return debugVerbose() ? 500 : 20;
+}
 
 function pushTail(tail: string[], chunk: string) {
+  const limit = stderrTailLimit();
   for (const line of chunk.split("\n")) {
     if (!line.trim()) continue;
     tail.push(line);
-    if (tail.length > STDERR_TAIL_LINES) tail.shift();
+    if (tail.length > limit) tail.shift();
   }
 }
 
 /** Resolve a YouTube URL (video or playlist) into track metadata, without downloading. */
 export async function resolve(url: string): Promise<ResolveResult> {
   return withYtdlpCookieArgs(async (cookieArgs) => {
-    const args = ["-J", "--flat-playlist", "--no-warnings", ...cookieArgs, ...extraArgs(), url];
+    const args = [
+      "-J",
+      "--flat-playlist",
+      debugVerbose() ? "--verbose" : "--no-warnings",
+      ...cookieArgs,
+      ...extraArgs(),
+      url,
+    ];
 
     const stdout: Buffer[] = [];
     const stderrTail: string[] = [];

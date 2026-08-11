@@ -121,23 +121,34 @@ export async function updateTrack(
 
   const names: Record<string, string> = {};
   const values: Record<string, unknown> = {};
-  const sets = entries.map(([key, value], i) => {
+  const sets: string[] = [];
+  const removes: string[] = [];
+  entries.forEach(([key, value], i) => {
     const nameKey = `#f${i}`;
-    const valueKey = `:v${i}`;
     names[nameKey] = key;
-    values[valueKey] = value;
-    return `tracks[${index}].${nameKey} = ${valueKey}`;
+    if (value === undefined) {
+      removes.push(`tracks[${index}].${nameKey}`);
+    } else {
+      const valueKey = `:v${i}`;
+      values[valueKey] = value;
+      sets.push(`tracks[${index}].${nameKey} = ${valueKey}`);
+    }
   });
+
+  const clauses = [
+    sets.length > 0 ? `SET ${sets.join(", ")}` : undefined,
+    removes.length > 0 ? `REMOVE ${removes.join(", ")}` : undefined,
+  ].filter((c): c is string => c !== undefined);
 
   try {
     await client().send(
       new UpdateCommand({
         TableName: tableName(),
         Key: { jobId },
-        UpdateExpression: `SET ${sets.join(", ")}`,
+        UpdateExpression: clauses.join(" "),
         ConditionExpression: "attribute_exists(jobId)",
         ExpressionAttributeNames: names,
-        ExpressionAttributeValues: values,
+        ExpressionAttributeValues: Object.keys(values).length > 0 ? values : undefined,
       }),
     );
   } catch (err) {

@@ -35,7 +35,14 @@ export class GithubDeployStack extends cdk.Stack {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
         },
         StringLike: {
-          "token.actions.githubusercontent.com:sub": `repo:${props.githubRepo}:*`,
+          // Two shapes, matching the account's existing
+          // secure-transfer-github-deploy role exactly: the classic
+          // "repo:owner/name:*" form, and the owner/repo-ID-qualified form
+          // GitHub's OIDC tokens can also use.
+          "token.actions.githubusercontent.com:sub": [
+            `repo:${props.githubRepo}:*`,
+            `repo:${props.githubRepo.split("/")[0]}@*/${props.githubRepo.split("/")[1]}@*:*`,
+          ],
         },
       }),
       description: "Assumed by GitHub Actions (OIDC) to run `cdk deploy` for yoto-downloader.",

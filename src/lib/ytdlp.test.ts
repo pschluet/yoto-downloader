@@ -93,7 +93,7 @@ describe("resolve", () => {
     await promise;
   });
 
-  it("splices the admin-managed cookie jar's args in before extraArgs and the url", async () => {
+  it("splices the admin-managed cookie jar's args in before extraArgs and the url, and avoids the web client", async () => {
     mockWithCookieArgs.mockImplementation((fn: (args: string[]) => unknown) =>
       fn(["--cookies", "/tmp/yt-cookies.txt"]),
     );
@@ -108,8 +108,24 @@ describe("resolve", () => {
       "--no-warnings",
       "--cookies",
       "/tmp/yt-cookies.txt",
+      "--extractor-args",
+      "youtube:player_client=default,-web",
       "https://www.youtube.com/watch?v=abc",
     ]);
+
+    writeStdout(child, JSON.stringify({ _type: "video", id: "abc", title: "T", duration: 1 }));
+    closeWith(child, 0);
+    await promise;
+  });
+
+  it("doesn't add --extractor-args when there are no cookies to attach", async () => {
+    mockWithCookieArgs.mockImplementation((fn: (args: string[]) => unknown) => fn([]));
+    const child = createFakeChild();
+    mockSpawn.mockReturnValue(child as never);
+
+    const promise = resolve("https://www.youtube.com/watch?v=abc");
+    const [, args] = mockSpawn.mock.calls[0];
+    expect(args).not.toContain("--extractor-args");
 
     writeStdout(child, JSON.stringify({ _type: "video", id: "abc", title: "T", duration: 1 }));
     closeWith(child, 0);
@@ -322,7 +338,7 @@ describe("downloadTrack", () => {
     expect(mockWithCookieArgs).not.toHaveBeenCalled();
   });
 
-  it("splices the admin-managed cookie jar's args in before extraArgs and the url", () => {
+  it("splices the admin-managed cookie jar's args in before extraArgs and the url, and avoids the web client", () => {
     mockWithCookieArgs.mockImplementation((fn: (args: string[]) => unknown) =>
       fn(["--cookies", "/tmp/yt-cookies.txt"]),
     );
@@ -332,6 +348,17 @@ describe("downloadTrack", () => {
     expect(args.indexOf("--cookies")).toBeGreaterThan(-1);
     expect(args.indexOf("--cookies")).toBeLessThan(args.indexOf(url));
     expect(args[args.indexOf("--cookies") + 1]).toBe("/tmp/yt-cookies.txt");
+    expect(args).toEqual(
+      expect.arrayContaining(["--extractor-args", "youtube:player_client=default,-web"]),
+    );
+    expect(args.indexOf("--extractor-args")).toBeLessThan(args.indexOf(url));
+  });
+
+  it("doesn't add --extractor-args when there are no cookies to attach", () => {
+    mockWithCookieArgs.mockImplementation((fn: (args: string[]) => unknown) => fn([]));
+    start();
+    const [, args] = mockSpawn.mock.calls[0];
+    expect(args).not.toContain("--extractor-args");
   });
 
   it("parses download progress, clamping pct at 100 and passing NA fields through as undefined", async () => {

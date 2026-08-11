@@ -21,10 +21,21 @@ function hasLocalCookieOverride(): boolean {
   return COOKIE_OVERRIDE_RE.test(process.env.YTDLP_EXTRA_ARGS ?? "");
 }
 
+// When cookies are attached, yt-dlp favors the authenticated "web" client —
+// which, from a datacenter IP (Lambda's), tends to get formats gated behind a
+// PO token we don't provide, failing with "Requested format is not available"
+// even though the cookies themselves are valid. Excluding "web" and falling
+// back to the other default clients (ios/android/etc.) avoids that wall while
+// still sending the cookies for the ones that check for a signed-in session.
+const AVOID_WEB_CLIENT_ARGS = ["--extractor-args", "youtube:player_client=default,-web"];
+
 /** Runs `fn` with the yt-dlp cookie args to use: the admin-managed S3 cookie
  *  jar (see src/lib/cookies.ts), or none if a local override is set. */
 function withYtdlpCookieArgs<T>(fn: (args: string[]) => Promise<T>): Promise<T> {
-  return hasLocalCookieOverride() ? fn([]) : withCookieArgs(fn);
+  if (hasLocalCookieOverride()) return fn([]);
+  return withCookieArgs((cookieArgs) =>
+    fn(cookieArgs.length > 0 ? [...cookieArgs, ...AVOID_WEB_CLIENT_ARGS] : cookieArgs),
+  );
 }
 
 const YOUTUBE_HOST_RE = /(^|\.)youtube\.com$|(^|\.)youtu\.be$|(^|\.)music\.youtube\.com$/i;

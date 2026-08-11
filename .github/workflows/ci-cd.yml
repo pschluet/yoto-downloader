@@ -23,8 +23,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      - run: npx tsc --noEmit
       - run: npm test
+      # `next build` runs its own full TypeScript check as part of the
+      # build — a separate `tsc --noEmit` step here would run *before*
+      # `.next/types` (which some app types, e.g. LayoutProps, depend on)
+      # has ever been generated on a fresh checkout, and fail spuriously.
       - run: npm run build
 
   infra-synth:

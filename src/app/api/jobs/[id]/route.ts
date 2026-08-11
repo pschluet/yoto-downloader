@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const snapshot = getSnapshot(id);
+  const snapshot = await getSnapshot(id);
   if (!snapshot) {
     return NextResponse.json({ error: "Job not found." }, { status: 404 });
   }

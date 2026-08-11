@@ -1,0 +1,74 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  test:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run build
+
+  infra-synth:
+    name: CDK synth
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - working-directory: infra
+        run: npm ci
+      - working-directory: infra
+        run: npm run build
+      # Reads the hosted-zone lookup from the committed infra/cdk.context.json
+      # rather than calling Route53 live, so this job needs no AWS credentials.
+      - working-directory: infra
+        run: npx cdk synth
+
+  deploy:
+    name: Deploy (infra + app)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test, infra-synth]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - working-directory: infra
+        run: npm ci
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::435432815368:role/yoto-downloader-github-deploy
+          aws-region: us-east-2
+      # Both Lambdas are container-image assets, so this one command builds
+      # and pushes fresh app code *and* applies any infra changes — there's
+      # no separate "deploy the app" step.
+      - working-directory: infra
+        run: npm run deploy

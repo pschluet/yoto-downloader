@@ -50,6 +50,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=ytdlp /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
 
+# Lets this same image run as a Lambda function: it proxies the Lambda
+# Runtime API to plain HTTP against the Next.js server below, so the app
+# code doesn't need to know it's running on Lambda at all. It's an inert
+# no-op layer under `docker compose` / plain `docker run` — nothing invokes
+# a Lambda extension outside a real Lambda execution environment.
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1 /lambda-adapter /opt/extensions/lambda-adapter
+ENV AWS_LWA_PORT=3000
+# Matches the Function URL's RESPONSE_STREAM invoke mode (see infra/), which
+# the /api/jobs/[id]/events polling stream depends on.
+ENV AWS_LWA_INVOKE_MODE=response_stream
+
 # Next's traced standalone output — only the files the app actually needs,
 # not the full node_modules tree.
 COPY --from=builder /app/.next/standalone ./

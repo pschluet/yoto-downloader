@@ -1,0 +1,9 @@
+node_modules
+cdk.out
+*.js
+*.d.ts
+!jest.config.js
+
+# Deliberately NOT ignored: cdk.context.json caches the Route53 hosted-zone
+# lookup in edge-stack.ts, so CI doesn't need live Route53 access or a
+# route53:GetHostedZone permission on the deploy role.

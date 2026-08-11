@@ -29,13 +29,13 @@ beforeEach(() => {
 
 describe("GET /api/jobs/[id]", () => {
   it("404s for an unknown job", async () => {
-    mockGetSnapshot.mockReturnValue(undefined);
+    mockGetSnapshot.mockResolvedValue(undefined);
     const res = await GET(new Request("http://localhost"), ctx("missing"));
     expect(res.status).toBe(404);
   });
 
   it("200s with the snapshot for a known job", async () => {
-    mockGetSnapshot.mockReturnValue(snapshot);
+    mockGetSnapshot.mockResolvedValue(snapshot);
     const res = await GET(new Request("http://localhost"), ctx("job-1"));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(snapshot);

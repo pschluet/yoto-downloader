@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+
+ARG YTDLP_VERSION=2026.03.17
+
+# ---- builder: bundle the worker handler (+ its @/lib imports) into one file
+FROM node:22-bookworm-slim AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
+RUN npx esbuild src/worker/handler.ts --bundle --platform=node --target=node22 \
+      --outfile=dist/index.js
+
+# ---- runner: AWS's own Lambda Node.js base image (Amazon Linux) + static
+# yt-dlp/ffmpeg binaries — this image has no apt/yum package for ffmpeg, so
+# both are fetched as prebuilt binaries rather than installed from a repo.
+FROM public.ecr.aws/lambda/nodejs:22 AS runner
+ARG YTDLP_VERSION
+ARG TARGETARCH
+
+RUN dnf install -y tar xz && \
+    case "${TARGETARCH}" in \
+      amd64) ytdlp_asset=yt-dlp_linux; ffmpeg_arch=amd64 ;; \
+      arm64) ytdlp_asset=yt-dlp_linux_aarch64; ffmpeg_arch=arm64 ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL -o /usr/local/bin/yt-dlp \
+      "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${ytdlp_asset}" && \
+    chmod a+rx /usr/local/bin/yt-dlp && \
+    curl -fsSL -o /tmp/ffmpeg.tar.xz \
+      "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${ffmpeg_arch}-static.tar.xz" && \
+    mkdir -p /tmp/ffmpeg-extract && \
+    tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-extract --strip-components=1 && \
+    cp /tmp/ffmpeg-extract/ffmpeg /tmp/ffmpeg-extract/ffprobe /usr/local/bin/ && \
+    chmod a+rx /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    rm -rf /tmp/ffmpeg* && \
+    dnf remove -y tar xz && dnf clean all
+
+ENV PATH="/usr/local/bin:${PATH}"
+
+COPY --from=builder /app/dist/index.js ${LAMBDA_TASK_ROOT}/index.js
+
+CMD ["index.handler"]

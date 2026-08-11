@@ -3,6 +3,11 @@ node_modules
 .git
 .github
 coverage
+# The CDK app isn't part of either Docker image, and cdk.out lives inside
+# the same repo root used as the Docker build context — without this,
+# CDK's own asset-staging copy recurses into its own output directory.
+infra/cdk.out
+infra/node_modules
 *.md
 !README.md
 **/*.test.ts

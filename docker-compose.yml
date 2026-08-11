@@ -1,3 +1,9 @@
+# Runs the same two container images deployed to Lambda (see infra/), against
+# your REAL deployed AWS backend (DynamoDB/S3/SQS/Cognito) — there's no local
+# stand-in for those. Export AWS credentials into your shell first, e.g.:
+#   eval "$(aws configure export-credentials --profile <profile> --format env)"
+# then fill in the resource values below (from `cd infra && npx cdk deploy`'s
+# outputs, or the AWS console) and run `docker compose up`.
 services:
   app:
     build:
@@ -7,13 +13,41 @@ services:
     ports:
       - "3000:3000"
     environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_REGION=${AWS_REGION:-us-east-2}
+      - JOBS_TABLE_NAME=${JOBS_TABLE_NAME}
+      - FILES_BUCKET_NAME=${FILES_BUCKET_NAME}
+      - TRACKS_QUEUE_URL=${TRACKS_QUEUE_URL}
+      - COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}
+      - COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}
       - YTDLP_EXTRA_ARGS=${YTDLP_EXTRA_ARGS:-}
     # If YouTube challenges you with "Sign in to confirm you're not a bot",
     # there's no browser profile inside the container for --cookies-from-browser
     # to read. Instead, export your browser's cookies to a cookies.txt file,
     # uncomment the mount below, and set:
     #   YTDLP_EXTRA_ARGS=--cookies /cookies.txt
-    # (e.g. in a .env file next to this one, or inline before `docker compose up`).
     # volumes:
     #   - ./cookies.txt:/cookies.txt:ro
     restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      args:
+        YTDLP_VERSION: ${YTDLP_VERSION:-2026.03.17}
+    # This image's entrypoint is the Lambda Runtime Interface Client, which
+    # expects to be invoked via the Lambda Runtime API — it's genuinely
+    # Lambda-only, unlike `app` above. Kept here mainly so `docker compose
+    # build` can smoke-test that it still builds; running it standalone
+    # needs the Runtime Interface Emulator (see README.md).
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_SESSION_TOKEN
+      - AWS_REGION=${AWS_REGION:-us-east-2}
+      - JOBS_TABLE_NAME=${JOBS_TABLE_NAME}
+      - FILES_BUCKET_NAME=${FILES_BUCKET_NAME}
+    profiles: ["worker"]

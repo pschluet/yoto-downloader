@@ -1,17 +1,22 @@
 import { ZipArchive } from "archiver";
-import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import { contentDisposition, dedupeFilenames, sanitizeFilename } from "@/lib/format";
-import { getJob, trackFilePath } from "@/lib/jobs";
+import { getJob } from "@/lib/jobs";
+import { getObjectReadStream, getPresignedDownloadUrl } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** Single video → the one mp3. Playlist → a zip of every completed track. */
+/**
+ * Single video → redirect to a presigned S3 URL (cheaper and faster than
+ * proxying the bytes back through this Lambda). Playlist → a zip has to be
+ * built server-side; each track streams in from S3 the same way the
+ * local/Docker version read it from local disk.
+ */
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const job = getJob(id);
+  const job = await getJob(id);
   if (!job) {
     return NextResponse.json({ error: "Job not found." }, { status: 404 });
   }
@@ -24,14 +29,8 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   if (job.kind === "video") {
     const track = doneTracks[0];
     const filename = `${sanitizeFilename(track.title)}.mp3`;
-    const nodeStream = createReadStream(trackFilePath(job.tmpDir, track.id));
-    return new Response(Readable.toWeb(nodeStream) as ReadableStream, {
-      headers: {
-        "Content-Type": "audio/mpeg",
-        "Content-Disposition": contentDisposition(filename),
-        ...(track.fileSize ? { "Content-Length": String(track.fileSize) } : {}),
-      },
-    });
+    const url = await getPresignedDownloadUrl(id, track.id, filename);
+    return NextResponse.redirect(url, 302);
   }
 
   const filenames = dedupeFilenames(doneTracks.map((t) => sanitizeFilename(t.title)));
@@ -39,9 +38,16 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   archive.on("error", (err: Error) => {
     console.error("zip archive error:", err);
   });
-  doneTracks.forEach((track, i) => {
-    archive.file(trackFilePath(job.tmpDir, track.id), { name: `${filenames[i]}.mp3` });
-  });
+
+  // Sequential, not Promise.all: keeps zip entry order matching
+  // doneTracks/filenames deterministically, and S3 GetObject's own latency
+  // (returning a stream handle, not the full body) is small enough that
+  // this doesn't meaningfully slow down a personal-scale playlist.
+  for (let i = 0; i < doneTracks.length; i++) {
+    const track = doneTracks[i];
+    const stream = await getObjectReadStream(id, track.id);
+    archive.append(stream, { name: `${filenames[i]}.mp3` });
+  }
   void archive.finalize();
 
   const zipName = `${sanitizeFilename(job.title)}.zip`;

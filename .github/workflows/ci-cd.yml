@@ -66,6 +66,12 @@ jobs:
           cache-dependency-path: infra/package-lock.json
       - working-directory: infra
         run: npm ci
+      # Both Lambda images build for linux/arm64 (Graviton is meaningfully
+      # cheaper) — the runner itself is x86_64, so building/running arm64
+      # layers (e.g. `npm ci` inside the Dockerfiles) needs QEMU emulation.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::435432815368:role/yoto-downloader-github-deploy

@@ -3,11 +3,12 @@ node_modules
 .git
 .github
 coverage
-# The CDK app isn't part of either Docker image, and cdk.out lives inside
-# the same repo root used as the Docker build context — without this,
-# CDK's own asset-staging copy recurses into its own output directory.
-infra/cdk.out
-infra/node_modules
+# The CDK app isn't part of either Docker image (and cdk.out lives inside
+# the same repo root used as the Docker build context — without excluding
+# it, CDK's own asset-staging copy would recurse into its own output
+# directory). Excluding all of infra/, not just its generated output, also
+# means infra-only changes don't invalidate/rebuild the app images.
+infra
 *.md
 !README.md
 **/*.test.ts

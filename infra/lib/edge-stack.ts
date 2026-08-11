@@ -59,6 +59,16 @@ export class EdgeStack extends cdk.Stack {
           cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
           originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
         },
+        // CloudFront's automatic compression buffers enough of the response
+        // to decide how to encode it, which breaks incremental delivery —
+        // fine for ordinary JSON/HTML (the default behavior above), fatal
+        // for a held-open SSE stream. next.config.ts already disables
+        // Next's own compression response-wide for the same reason; this is
+        // the matching CloudFront-side setting for this one route.
+        "/api/jobs/*/events": {
+          ...dynamicBehavior,
+          compress: false,
+        },
       },
       domainNames: [props.domainName],
       certificate,

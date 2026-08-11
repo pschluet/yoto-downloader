@@ -73,6 +73,10 @@ export class AuthStack extends cdk.Stack {
             { Name: "email", Value: props.adminEmail },
             { Name: "email_verified", Value: "true" },
           ],
+          // AdminCreateUser defaults this to SMS — since no phone number is
+          // ever collected here, that would silently fail to deliver the
+          // temporary password at all.
+          DesiredDeliveryMediums: ["EMAIL"],
         },
         physicalResourceId: PhysicalResourceId.of(`admin-user-${props.adminEmail}`),
         ignoreErrorCodesMatching: "UsernameExistsException",

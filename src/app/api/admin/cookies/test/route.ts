@@ -49,8 +49,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, title, usedCookies: status.present });
   } catch (err) {
     if (err instanceof YtdlpError) {
+      // yt-dlp's own stderr, not the cookie contents — safe to log, and the
+      // only way to diagnose *why* a cookie jar didn't satisfy YouTube.
+      console.error("Cookie test failed:", err.message, "\nstderr tail:\n" + err.stderrTail);
       return NextResponse.json({ error: err.message }, { status: 502 });
     }
+    console.error("Cookie test failed with an unexpected error:", err);
     return NextResponse.json({ error: "Test failed." }, { status: 502 });
   }
 }

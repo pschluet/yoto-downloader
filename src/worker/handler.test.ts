@@ -49,6 +49,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const p of writtenPaths.splice(0)) {
     if (existsSync(p)) await unlink(p).catch(() => {});
   }
@@ -146,6 +147,40 @@ describe("worker handler", () => {
     );
 
     expect(result).toEqual({ batchItemFailures: [{ itemIdentifier: "msg-0" }] });
+  });
+
+  it("times out a stuck download rather than hanging until Lambda's own timeout kills it", async () => {
+    vi.useFakeTimers();
+    mockDownloadTrack.mockImplementation((_videoId, _tmpDir, _onProgress, signal: AbortSignal) => {
+      // Simulates a hung yt-dlp process: never resolves on its own, but
+      // does honor abort the same way the real downloadTrack does.
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new YtdlpError("Canceled.", "")), {
+          once: true,
+        });
+      });
+    });
+
+    const resultPromise = handler(
+      sqsEvent({ jobId: "job-1", trackIndex: 0, videoId: "stuck" }),
+      noopContext,
+      noopCallback,
+    );
+
+    // Both attempts' internal timeouts, plus the inter-attempt delay.
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    await resultPromise;
+
+    vi.useRealTimers();
+
+    expect(mockDownloadTrack).toHaveBeenCalledTimes(2);
+    expect(mockUpdateTrack).toHaveBeenLastCalledWith("job-1", 0, {
+      status: "failed",
+      error: "Download timed out.",
+    });
+    expect(mockUploadTrackFile).not.toHaveBeenCalled();
   });
 
   it("processes multiple records in one batch independently", async () => {

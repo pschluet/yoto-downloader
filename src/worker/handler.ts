@@ -9,6 +9,14 @@ import type { TrackMessage } from "@/lib/queue";
 
 const MAX_AUTO_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1500;
+// A stuck yt-dlp process (e.g. a hung network read) would otherwise run
+// until Lambda's own hard timeout kills the invocation mid-attempt, with no
+// chance to run any more code at all — leaving the track stuck "downloading"
+// in DynamoDB forever, since the client just keeps reconnecting to a job
+// that never reaches a terminal state. Two attempts at this bound, plus the
+// retry delay, stay safely under the worker Lambda's 5-minute timeout
+// (see infra/lib/worker-stack.ts) with margin for the upload/DB writes.
+const ATTEMPT_TIMEOUT_MS = 2 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,8 +37,6 @@ async function processTrack({ jobId, trackIndex, videoId }: TrackMessage): Promi
     return;
   }
 
-  const controller = new AbortController();
-
   for (let attempt = 1; attempt <= MAX_AUTO_ATTEMPTS; attempt++) {
     if (await isCanceled(jobId)) {
       await updateTrack(jobId, trackIndex, { status: "canceled" });
@@ -44,6 +50,15 @@ async function processTrack({ jobId, trackIndex, videoId }: TrackMessage): Promi
       error: undefined,
       attempts: attempt,
     });
+
+    // Fresh per attempt: aborting is one-way, so a timed-out attempt 1
+    // must not poison attempt 2's signal.
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, ATTEMPT_TIMEOUT_MS);
 
     // downloadTrack's onProgress callback is synchronous (called straight
     // from the child process's stdout handler), so DynamoDB writes are
@@ -80,11 +95,17 @@ async function processTrack({ jobId, trackIndex, videoId }: TrackMessage): Promi
       return;
     } catch (err) {
       await progressChain;
-      const message = err instanceof YtdlpError ? err.message : "Download failed.";
+      const message = timedOut
+        ? "Download timed out."
+        : err instanceof YtdlpError
+          ? err.message
+          : "Download failed.";
       await updateTrack(jobId, trackIndex, { status: "failed", error: message });
       if (attempt < MAX_AUTO_ATTEMPTS) {
         await sleep(RETRY_DELAY_MS);
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 }
